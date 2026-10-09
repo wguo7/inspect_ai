@@ -175,6 +175,8 @@ grouped(accuracy(), "category", name_template="category_{group_name}")
 
 This would produce metrics named `category_physics`, `category_chemistry`, etc. instead of just `physics`, `chemistry`. It does not affect the "all" metric, so that can be named separately.
 
+If the grouped metric returns a dictionary, such as the `lower` and `upper` bounds of `ci()`, each entry is reported as its own metric named `{group}-{key}` (e.g. `physics-lower`, `physics-upper`, `all-lower`; with `name_template`, the template applies to the group part, e.g. `category_physics-lower`). `all="groups"` raises an error for these metrics, since there is no single value per group to average. Metrics declared with `scores="unreduced"`, such as `frequency()`, can't be grouped.
+
 ## Per-Key Aggregation
 
 Some scorers emit a dict-valued `Score.value` with several numeric fields per sample. The `aggregate()` function applies a given metric to a single field selected by key, so any standard metric can be computed per key:

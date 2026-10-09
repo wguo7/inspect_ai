@@ -15,6 +15,7 @@ from inspect_ai.scorer import (
     Scorer,
     Value,
     accuracy,
+    frequency,
     includes,
     match,
     mean,
@@ -791,6 +792,150 @@ def test_custom_name_template():
     assert result["mean_A"] == 2.0
     assert result["mean_B"] == 6.0
     assert result["mean_all"] == 4.0
+
+
+_CATEGORY_VALUES = [
+    (1, "x"),
+    (0, "x"),
+    (1, "x"),
+    (1, "y"),
+    (0, "y"),
+    (1, "y"),
+    (1, "y"),
+]
+
+
+def _category_scores() -> list[SampleScore]:
+    return [
+        SampleScore(score=Score(value=v), sample_metadata={"category": c})
+        for v, c in _CATEGORY_VALUES
+    ]
+
+
+def _apply(metric: Metric, scores: list[SampleScore]) -> dict[str, float]:
+    return cast(dict[str, float], cast(MetricProtocol, metric)(scores))
+
+
+@pytest.mark.parametrize("interval", [ci(), ci_wilson()], ids=["ci", "ci_wilson"])
+def test_grouped_mapping_metric_reports_each_entry(interval: Metric) -> None:
+    scores = _category_scores()
+    result = _apply(grouped(interval, group_key="category"), scores)
+
+    expected: dict[str, float] = {}
+    for name, group in [("x", scores[:3]), ("y", scores[3:]), ("all", scores)]:
+        for key, value in _apply(interval, group).items():
+            expected[f"{name}-{key}"] = value
+    assert result == pytest.approx(expected)
+
+
+def test_grouped_mapping_metric_with_all_false_and_name_template() -> None:
+    result = _apply(
+        grouped(
+            ci(), group_key="category", all=False, name_template="cat_{group_name}"
+        ),
+        _category_scores(),
+    )
+    assert sorted(result) == [
+        "cat_x-lower",
+        "cat_x-upper",
+        "cat_y-lower",
+        "cat_y-upper",
+    ]
+
+
+def test_grouped_mapping_metric_rejects_all_groups() -> None:
+    with pytest.raises(ValueError, match='all="groups"'):
+        _apply(grouped(ci(), group_key="category", all="groups"), _category_scores())
+
+
+def test_grouped_mapping_metric_in_eval() -> None:
+    @scorer(metrics=[grouped(ci(), "category")])
+    def value_from_target() -> Scorer:
+        async def score(state: TaskState, target: Target) -> Score:
+            return Score(value=float(target.text))
+
+        return score
+
+    task = Task(
+        dataset=[
+            Sample(input=f"q{i}", target=str(v), metadata={"category": c})
+            for i, (v, c) in enumerate(_CATEGORY_VALUES)
+        ],
+        scorer=value_from_target(),
+    )
+    log = eval(tasks=task, model="mockllm/model")[0]
+
+    assert log.status == "success"
+    assert log.results
+    metrics = log.results.scores[0].metrics
+    expected = _apply(grouped(ci(), "category"), _category_scores())
+    assert {name: m.value for name, m in metrics.items()} == pytest.approx(expected)
+
+
+def test_grouped_mapping_metric_for_dict_scorer_in_eval() -> None:
+    @scorer(metrics={"value": [grouped(ci(), "category")]})
+    def dict_value_from_target() -> Scorer:
+        async def score(state: TaskState, target: Target) -> Score:
+            return Score(value={"value": float(target.text)})
+
+        return score
+
+    task = Task(
+        dataset=[
+            Sample(input=f"q{i}", target=str(v), metadata={"category": c})
+            for i, (v, c) in enumerate(_CATEGORY_VALUES)
+        ],
+        scorer=dict_value_from_target(),
+    )
+    log = eval(tasks=task, model="mockllm/model")[0]
+
+    assert log.status == "success"
+    assert log.results
+    metrics = log.results.scores[0].metrics
+    expected = _apply(grouped(ci(), "category"), _category_scores())
+    assert {m.name: m.value for m in metrics.values()} == pytest.approx(expected)
+
+
+def test_grouped_rejects_unreduced_metric() -> None:
+    with pytest.raises(ValueError, match='frequency\\(\\).*scores="unreduced"'):
+        grouped(frequency(), "category")
+
+
+def test_grouped_mapping_metric_rejects_duplicate_names() -> None:
+    @metric
+    def overlapping_keys() -> Metric:
+        def compute(scores: list[SampleScore]) -> Value:
+            return {"b": 1.0, "a-b": 2.0}
+
+        return compute
+
+    # group "x" with key "a-b" and group "x-a" with key "b" both give "x-a-b"
+    scores = [
+        SampleScore(score=Score(value=1), sample_metadata={"category": "x"}),
+        SampleScore(score=Score(value=1), sample_metadata={"category": "x-a"}),
+    ]
+    with pytest.raises(ValueError, match="'x-a-b' twice"):
+        _apply(grouped(overlapping_keys(), "category", all=False), scores)
+
+
+def test_grouped_metric_error_names_the_group() -> None:
+    # group "b" has a single cluster, which ci_wilson(cluster=...) rejects
+    scores = [
+        SampleScore(
+            score=Score(value=value), sample_metadata={"category": c, "seed": seed}
+        )
+        for value, c, seed in [(1, "a", 0), (0, "a", 1), (1, "b", 0), (0, "b", 0)]
+    ]
+    with pytest.raises(
+        ValueError, match="samples with category='b': .*at least two clusters"
+    ):
+        _apply(grouped(ci_wilson(cluster="seed"), "category", all=False), scores)
+
+
+def test_grouped_mapping_metric_all_unscored_reports_all_key() -> None:
+    result = _apply(grouped(ci(), "category"), [])
+    assert list(result) == ["all"]
+    assert math.isnan(result["all"])
 
 
 class Metadata(BaseModel, frozen=True):
